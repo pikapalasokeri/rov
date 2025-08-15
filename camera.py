@@ -3,36 +3,30 @@ import io
 from threading import Condition, Thread
 
 
-class StreamingOutput(object):
-    # From https://picamera.readthedocs.io/en/release-1.13/recipes2.html#web-streaming
+class StreamingOutput(io.BufferedIOBase):
+    # From https://github.com/raspberrypi/picamera2/blob/main/examples/mjpeg_server.py
 
     def __init__(self):
         self.frame = None
-        self.buffer = io.BytesIO()
         self.frame_ready_cv = Condition()
 
     def write(self, buf):
-        if buf.startswith(b"\xff\xd8"):
-            # New frame, copy the existing buffer's content and notify all
-            # clients it's available
-            self.buffer.truncate()
-            with self.frame_ready_cv:
-                self.frame = self.buffer.getvalue()
-                self.frame_ready_cv.notify_all()
-            self.buffer.seek(0)
-        return self.buffer.write(buf)
+        with self.frame_ready_cv:
+            self.frame = buf
+            self.frame_ready_cv.notify_all()
 
     def get(self):
         with self.frame_ready_cv:
             self.frame_ready_cv.wait()
-            return self.buffer.getvalue()
+            return self.frame
 
 
 def _get_camera_interface():
     try:
-        from picamera import PiCamera
+        from picamera2_wrapper import ReasonablePicameraWrapper
 
-        return PiCamera()
+        return ReasonablePicameraWrapper()
+
     except ModuleNotFoundError as e:
         from laptop_camera import LaptopCamera
 
@@ -77,28 +71,18 @@ class Camera(object):
     @classmethod
     def _thread(cls, resolution_video, resolution_image):
         with _get_camera_interface() as camera:
-            camera.resolution = resolution_image
-            camera.hflip = False
-            camera.vflip = False
-
-            camera.start_recording(
-                cls.video_stream, format="mjpeg", resize=resolution_video
-            )
+            camera.start_recording(cls.video_stream)
 
             while True:
                 with cls.image_requested_cv:
                     cls.image_requested_cv.wait()
 
-                    # Using capure() will cause frame drops on the video stream. This is ok since
-                    # the video stream won't be viewed by the user anyway when looking
-                    # at the high res image.
                     image_stream = io.BytesIO()
-                    camera.capture(
+                    camera.capture_file(
                         image_stream,
-                        resize=resolution_image,
                         format="jpeg",
-                        quality=100,
                     )
+
                     with cls.image_ready_cv:
                         cls.image_frame = image_stream.getvalue()
                         cls.image_ready_cv.notify_all()
